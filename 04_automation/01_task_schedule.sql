@@ -1,0 +1,36 @@
+USE DATABASE INGEST_DB;
+
+-- Example: run a merge every hour (assumes RAW already loaded by another process)
+-- In a real pipeline you’d often: Snowpipe/COPY -> RAW continuously, then TASK merges to CURATED.
+
+CREATE OR REPLACE TASK OPS.TSK_MERGE_CUSTOMERS_HOURLY
+  WAREHOUSE = <YOUR_WAREHOUSE>
+  SCHEDULE = 'USING CRON 0 * * * * UTC'
+AS
+  EXECUTE IMMEDIATE $$
+    -- Call the merge script logic inline (kept simple for template)
+    MERGE INTO INGEST_DB.CURATED.CUSTOMERS t
+    USING (
+      SELECT CUSTOMER_ID, FULL_NAME, EMAIL, CITY, INGEST_TS, LOAD_ID
+      FROM INGEST_DB.RAW.CUSTOMERS_RAW
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY CUSTOMER_ID
+        ORDER BY INGEST_TS DESC, ROW_NUMBER_IN_FILE DESC
+      ) = 1
+    ) s
+      ON t.CUSTOMER_ID = s.CUSTOMER_ID
+    WHEN MATCHED THEN UPDATE SET
+      FULL_NAME  = s.FULL_NAME,
+      EMAIL      = s.EMAIL,
+      CITY       = s.CITY,
+      UPDATED_TS = CURRENT_TIMESTAMP(),
+      LOAD_ID    = s.LOAD_ID
+    WHEN NOT MATCHED THEN INSERT (
+      CUSTOMER_ID, FULL_NAME, EMAIL, CITY, UPDATED_TS, LOAD_ID
+    ) VALUES (
+      s.CUSTOMER_ID, s.FULL_NAME, s.EMAIL, s.CITY, CURRENT_TIMESTAMP(), s.LOAD_ID
+    );
+  $$;
+
+-- To enable:
+-- ALTER TASK OPS.TSK_MERGE_CUSTOMERS_HOURLY RESUME;
